@@ -5,21 +5,23 @@ import {
   releaseUnitsWithExpiredLeases,
 } from '../repositories/lease.repository';
 import { sendSubscriptionReminderEmail } from '../utils/mailer';
+import { sendSms } from '../utils/sms';
 
 import { generateInvoicesForAllLeases } from './invoice.service';
 
 const REMINDER_DAYS = [1, 3, 7];
 
-// Emails each owner 7, 3 and 1 days before a subscription ends, once per subscription period.
+// Emails and texts each owner 7, 3 and 1 days before a subscription ends, once per subscription period.
 const sendSubscriptionReminders = async (): Promise<number> => {
   const due = await query<{
     id: string;
     title: string;
     email: string;
+    phoneNumber: string | null;
     endsAt: Date;
     daysLeft: number;
   }>(
-    `SELECT p.id, p.title, a.email, p."subscriptionEndsAt" AS "endsAt",
+    `SELECT p.id, p.title, a.email, a."phoneNumber", p."subscriptionEndsAt" AS "endsAt",
             CEIL(EXTRACT(EPOCH FROM (p."subscriptionEndsAt" - NOW())) / 86400)::int AS "daysLeft"
        FROM properties p
        JOIN admins a ON a.id = p."ownerId"
@@ -56,6 +58,17 @@ const sendSubscriptionReminders = async (): Promise<number> => {
           WHERE "propertyId" = $1 AND "endsAt" = $2 AND days = $3;`,
         [row.id, row.endsAt, days],
       );
+      continue;
+    }
+    // Only after the email, and a failed text does not repeat the email on the next run.
+    if (row.phoneNumber) {
+      const dayWord = row.daysLeft === 1 ? 'day' : 'days';
+      await sendSms(
+        row.phoneNumber,
+        `EstateOps: the subscription for ${row.title} ends in ${row.daysLeft} ${dayWord}. Please renew it.`,
+      ).catch((error: unknown) => {
+        console.warn('[jobs] could not send a subscription reminder SMS:', error);
+      });
     }
   }
   return sent;
